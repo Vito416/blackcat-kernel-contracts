@@ -1,0 +1,277 @@
+name: AI Security Audit (Solidity)
+
+on:
+  schedule:
+    # Daily at 02:17 UTC (staggered to avoid competing with other repos at :00)
+    - cron: "17 2 * * *"
+  push:
+    branches:
+      - dev
+      - integration/dev
+    paths:
+      - "src/**"
+      - "test/**"
+      - "script/**"
+      - "foundry.toml"
+      - ".github/prompts/**"
+      - ".github/workflows/ai-security-audit.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-security-audit-solidity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    if: ${{ vars.AI_AUDIT_ENABLED == '1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (schedule -> dev)
+        if: ${{ github.event_name == 'schedule' }}
+        uses: actions/checkout@v6
+        with:
+          ref: dev
+
+      - name: Checkout (push)
+        if: ${{ github.event_name != 'schedule' }}
+        uses: actions/checkout@v6
+
+      - name: Select audit mode
+        id: mode
+        shell: bash
+        env:
+          AI_AUDIT_EFFORT: ${{ vars.AI_AUDIT_EFFORT }}
+        run: |
+          set -euo pipefail
+
+          MODES=(
+            "access-control"
+            "upgradeability"
+            "reentrancy"
+            "signatures-crypto"
+            "dos-griefing"
+            "invariants"
+            "economics-mev"
+          )
+
+          VARIANTS=("a" "b")
+
+          INDEX=$((GITHUB_RUN_NUMBER % ${#MODES[@]}))
+          MODE="${MODES[$INDEX]}"
+
+          # Rotate variants more slowly than modes: every full mode-cycle switches the variant.
+          VAR_INDEX=$(((GITHUB_RUN_NUMBER / ${#MODES[@]}) % ${#VARIANTS[@]}))
+          VARIANT="${VARIANTS[$VAR_INDEX]}"
+
+          EFFORT="${AI_AUDIT_EFFORT:-high}"
+          EFFORT="$(printf '%s' "$EFFORT" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+          if [ -z "$EFFORT" ] || [ "$EFFORT" = "auto" ]; then
+            EFFORT="high"
+          fi
+          if [ "$EFFORT" != "low" ] && [ "$EFFORT" != "medium" ] && [ "$EFFORT" != "high" ]; then
+            echo "Invalid AI_AUDIT_EFFORT: $EFFORT (expected low|medium|high)" >&2
+            exit 1
+          fi
+
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "variant=$VARIANT" >> "$GITHUB_OUTPUT"
+          echo "effort=$EFFORT" >> "$GITHUB_OUTPUT"
+
+          PROMPT_FILE=".github/prompts/solidity/${MODE}.md"
+          if [ "$VARIANT" = "b" ]; then
+            PROMPT_FILE=".github/prompts/solidity/${MODE}.b.md"
+          fi
+          if [ ! -f "$PROMPT_FILE" ]; then
+            echo "Missing prompt file: $PROMPT_FILE" >&2
+            exit 1
+          fi
+
+          echo "prompt_file=$PROMPT_FILE" >> "$GITHUB_OUTPUT"
+          echo "report_file=reports/ai-security-audit-solidity-${MODE}-${VARIANT}.md" >> "$GITHUB_OUTPUT"
+
+      - name: Select OpenAI API key (fallback pool)
+        id: key
+        shell: bash
+        env:
+          AI_AUDIT_MODEL: ${{ vars.AI_AUDIT_MODEL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEY_1: ${{ secrets.OPENAI_API_KEY_1 }}
+          OPENAI_API_KEY_2: ${{ secrets.OPENAI_API_KEY_2 }}
+          OPENAI_API_KEY_3: ${{ secrets.OPENAI_API_KEY_3 }}
+          OPENAI_API_KEY_4: ${{ secrets.OPENAI_API_KEY_4 }}
+          OPENAI_API_KEY_5: ${{ secrets.OPENAI_API_KEY_5 }}
+        run: |
+          set -euo pipefail
+
+          DEFAULT_CODEX_MODEL="gpt-5.1-codex-max"
+
+          REQUESTED_MODEL="${AI_AUDIT_MODEL:-}"
+          REQUESTED_MODEL="$(printf '%s' "$REQUESTED_MODEL" | tr -d '[:space:]')"
+          if [ -z "$REQUESTED_MODEL" ] || [ "$REQUESTED_MODEL" = "auto" ]; then
+            REQUESTED_MODEL=""
+          fi
+
+          REQUIRE_REQUESTED="false"
+
+          # Prefer OPENAI_API_KEY, then numbered keys.
+          KEYS=(
+            "${OPENAI_API_KEY:-}"
+            "${OPENAI_API_KEY_1:-}"
+            "${OPENAI_API_KEY_2:-}"
+            "${OPENAI_API_KEY_3:-}"
+            "${OPENAI_API_KEY_4:-}"
+            "${OPENAI_API_KEY_5:-}"
+          )
+
+          for KEY in "${KEYS[@]}"; do
+            if [ -z "$KEY" ]; then
+              continue
+            fi
+
+            MODELS_FILE="$(mktemp)"
+            MODELS_CODE="$(curl -sS -o "$MODELS_FILE" -w '%{http_code}' \
+              -H "Authorization: Bearer $KEY" \
+              https://api.openai.com/v1/models || true)"
+
+            if [ "$MODELS_CODE" != "200" ]; then
+              rm -f "$MODELS_FILE"
+              continue
+            fi
+
+            MODEL="$(
+              python3 - "$REQUESTED_MODEL" "$DEFAULT_CODEX_MODEL" "$REQUIRE_REQUESTED" "$MODELS_FILE" <<'PY'
+          import json
+          import re
+          import sys
+          
+          requested = sys.argv[1]
+          default_model = sys.argv[2]
+          require_requested = (sys.argv[3].lower() == "true")
+          
+          try:
+              with open(sys.argv[4], "r", encoding="utf-8") as f:
+                  data = json.load(f)
+          except Exception:
+              print("")
+              sys.exit(0)
+          
+          ids = []
+          for item in data.get("data", []):
+              if isinstance(item, dict):
+                  mid = item.get("id")
+                  if isinstance(mid, str):
+                      ids.append(mid)
+          
+          if requested == "":
+              requested = default_model
+
+          if require_requested and requested not in ids:
+              print("")
+              sys.exit(0)
+          
+          if requested in ids:
+              print(requested)
+              sys.exit(0)
+
+          # Prefer Codex models, selecting the newest available version.
+          codex = []
+          for mid in ids:
+              if "codex" not in mid:
+                  continue
+
+              m = re.match(r"^gpt-(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?-codex", mid)
+              if m:
+                  major = int(m.group(1) or "0")
+                  minor = int(m.group(2) or "0")
+                  patch = int(m.group(3) or "0")
+              else:
+                  major, minor, patch = 0, 0, 0
+              is_max = 1 if "-max" in mid else 0
+              codex.append(((major, minor, patch, is_max), mid))
+
+          if codex:
+              codex.sort(key=lambda it: it[0], reverse=True)
+              print(codex[0][1])
+              sys.exit(0)
+
+          # Fall back to any GPT model.
+          gpt = [mid for mid in ids if mid.startswith("gpt-")]
+          if gpt:
+              print(gpt[0])
+              sys.exit(0)
+          
+          if ids:
+              print(ids[0])
+              sys.exit(0)
+          
+          print("")
+          PY
+            )"
+            rm -f "$MODELS_FILE"
+
+            if [ -z "$MODEL" ]; then
+              continue
+            fi
+
+            # Real quota check: do a tiny Responses API call. This catches keys that can list models but can't run requests (quota=0).
+            REQ_BODY="$(printf '{"model":"%s","input":"healthcheck","max_output_tokens":1}' "$MODEL")"
+            RESP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $KEY" \
+              -H "Content-Type: application/json" \
+              https://api.openai.com/v1/responses \
+              -d "$REQ_BODY" || true)"
+
+            if [[ "$RESP_CODE" == 2* ]]; then
+              echo "OPENAI_API_KEY=$KEY" >> "$GITHUB_ENV"
+              echo "audit_model=$MODEL" >> "$GITHUB_OUTPUT"
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "No usable OpenAI API key found (quota/model). Configure secrets OPENAI_API_KEY or OPENAI_API_KEY_{1..5} and ensure API billing/quota is available." >&2
+          exit 1
+
+      - name: Prepare report folder
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+
+      - name: Run AI audit (full repo context)
+        id: codex
+        uses: openai/codex-action@086169432f1d2ab2f4057540b1754d550f6a1189 # v1.4
+        with:
+          openai-api-key: ${{ env.OPENAI_API_KEY }}
+          prompt-file: ${{ steps.mode.outputs.prompt_file }}
+          output-file: ${{ steps.mode.outputs.report_file }}
+          sandbox: read-only
+          model: ${{ steps.key.outputs.audit_model }}
+          effort: ${{ steps.mode.outputs.effort }}
+          allow-bots: true
+          safety-strategy: drop-sudo
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## AI Solidity Security Audit"
+            echo ""
+            echo "- Mode: \`${{ steps.mode.outputs.mode }}\`"
+            echo "- Variant: \`${{ steps.mode.outputs.variant }}\`"
+            echo "- Model: \`${{ steps.key.outputs.audit_model }}\`"
+            echo "- Prompt: \`${{ steps.mode.outputs.prompt_file }}\`"
+            echo "- Report: \`${{ steps.mode.outputs.report_file }}\`"
+            echo "- Effort: \`${{ steps.mode.outputs.effort }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-security-audit-solidity-${{ steps.mode.outputs.mode }}-${{ steps.mode.outputs.variant }}
+          path: ${{ steps.mode.outputs.report_file }}
+          if-no-files-found: error
