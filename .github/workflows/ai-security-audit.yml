@@ -34,10 +34,13 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: dev
+          persist-credentials: false
 
       - name: Checkout (push)
         if: ${{ github.event_name != 'schedule' }}
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Select audit mode
         id: mode

@@ -4,6 +4,8 @@ on:
   push:
   pull_request:
 
+permissions: { contents: read }
+
 jobs:
   slither:
     runs-on: ubuntu-latest
@@ -11,6 +13,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Slither (static analysis)
         run: |
