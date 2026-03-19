@@ -93,3 +93,7 @@ For a complete operator-oriented guide (including authority rotation, guard/bot 
 - Audit commitments (optional): [DeployAuditCommitmentHub.s.sol](script/DeployAuditCommitmentHub.s.sol), [PostAuditCommit.s.sol](script/PostAuditCommit.s.sol)
 
 **Security status (2026-01-02):** not independently audited yet. Continuous checks: Foundry tests + Slither (High/Medium=0) + rotating AI audits (daily). Internal “production candidate” target: **2026-02-01** (conditional). See: [SECURITY_STATUS](docs/SECURITY_STATUS.md).
+
+## Umbrella licensing note
+
+This repository is intended to be one official component of the Blackcat `Covered System`, not a separately monetized silo. Under the planned BFNL bundle, official Blackcat repositories and future mandatory internal components are treated as one integrated licensing surface for ordinary deployment classes. Repository separation exists for maintenance, safety, and delivery, not to trigger a separate founder fee or future steward/development fee for each repository. The current draft licensing bundle lives in the `blackcat-darkmesh-ao` repository under `docs/`.
