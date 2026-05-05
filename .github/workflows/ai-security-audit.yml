@@ -245,7 +245,7 @@ jobs:
 
       - name: Run AI audit (full repo context)
         id: codex
-        uses: openai/codex-action@086169432f1d2ab2f4057540b1754d550f6a1189 # v1.4
+        uses: openai/codex-action@e0fdf01220eb9a88167c4898839d273e3f2609d1 # v1.8
         with:
           openai-api-key: ${{ env.OPENAI_API_KEY }}
           prompt-file: ${{ steps.mode.outputs.prompt_file }}
